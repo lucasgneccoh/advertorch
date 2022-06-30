@@ -68,9 +68,15 @@ def perturb_iterative(xvar, yvar, predict, nb_iter, eps, eps_iter, loss_fn,
         outputs = predict(xvar + delta)
         if stop_when_done:
             # Assuming classification task
-            if torch.all(outputs.max(1)[1].eq(yvar)):
-                logging.info('advertorch:iterative:perturb Stopped')
+            if isinstance(outputs, list):
+                if sum([torch.all(o.max(1)[1].ne(yvar))
+                        for o in outputs]) == len(outputs):
+                    logging.info('advertorch:iterative:perturb Stopped early')
+                    break
+            if torch.all(outputs.max(1)[1].ne(yvar)):
+                logging.info('advertorch:iterative:perturb Stopped early')
                 break
+                
         loss = loss_fn(outputs, yvar)
         if minimize:
             loss = -loss
