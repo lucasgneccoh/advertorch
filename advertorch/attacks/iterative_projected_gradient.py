@@ -146,7 +146,8 @@ class PGDAttack(Attack, LabelMixin):
     def __init__(
             self, predict, loss_fn=None, eps=0.3, nb_iter=40,
             eps_iter=0.01, rand_init=True, clip_min=0., clip_max=1.,
-            ord=np.inf, l1_sparsity=None, targeted=False):
+            ord=np.inf, l1_sparsity=None, targeted=False,
+            stop_when_done = False):
         """
         Create an instance of the PGDAttack.
 
@@ -162,6 +163,7 @@ class PGDAttack(Attack, LabelMixin):
         if self.loss_fn is None:
             self.loss_fn = nn.CrossEntropyLoss(reduction="sum")
         self.l1_sparsity = l1_sparsity
+        self.stop_when_done = stop_when_done
         assert is_float_or_torch_tensor(self.eps_iter)
         assert is_float_or_torch_tensor(self.eps)
 
@@ -194,6 +196,7 @@ class PGDAttack(Attack, LabelMixin):
             ord=self.ord, clip_min=self.clip_min,
             clip_max=self.clip_max, delta_init=delta,
             l1_sparsity=self.l1_sparsity,
+            stop_when_done = self.stop_when_done
         )
 
         return rval.data
@@ -244,13 +247,14 @@ class L2PGDAttack(PGDAttack):
     def __init__(
             self, predict, loss_fn=None, eps=0.3, nb_iter=40,
             eps_iter=0.01, rand_init=True, clip_min=0., clip_max=1.,
-            targeted=False):
+            targeted=False,
+            stop_when_done=False):
         ord = 2
         super(L2PGDAttack, self).__init__(
             predict=predict, loss_fn=loss_fn, eps=eps, nb_iter=nb_iter,
             eps_iter=eps_iter, rand_init=rand_init, clip_min=clip_min,
             clip_max=clip_max, targeted=targeted,
-            ord=ord)
+            ord=ord, stop_when_done=stop_when_done)
 
 
 class L1PGDAttack(PGDAttack):
