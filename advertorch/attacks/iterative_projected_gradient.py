@@ -35,7 +35,7 @@ def perturb_iterative(xvar, yvar, predict, nb_iter, eps, eps_iter, loss_fn,
                       delta_init=None, minimize=False, ord=np.inf,
                       clip_min=0.0, clip_max=1.0,
                       l1_sparsity=None,
-                      stop_when_done = False):
+                      eot_iter=1):
     """
     Iteratively maximize the loss over the input. It is a shared method for
     iterative attacks including IterativeGradientSign, LinfPGD, etc.
@@ -63,44 +63,72 @@ def perturb_iterative(xvar, yvar, predict, nb_iter, eps, eps_iter, loss_fn,
     else:
         delta = torch.zeros_like(xvar)
 
-    delta.requires_grad_()
+    
     for ii in range(nb_iter):
-        outputs = predict(xvar + delta)
-        if stop_when_done:
-            # Assuming classification task
-            if isinstance(outputs, list):
-                if sum([torch.all(o.max(1)[1].ne(yvar))
-                        for o in outputs]) == len(outputs):
-                    logging.info('advertorch:iterative:perturb Stopped early')
-                    break
-            else:
-                if torch.all(outputs.max(1)[1].ne(yvar)):
-                    logging.info('advertorch:iterative:perturb Stopped early')
-                    break
-                
-        loss = loss_fn(outputs, yvar)
-        if minimize:
-            loss = -loss
+        # Add EoT
+        grad_total = None
+        delta.requires_grad_()
+        for _ in range(eot_iter):
+            outputs = predict(xvar + delta)
+                    
+            loss = loss_fn(outputs, yvar)
+            if minimize:
+                loss = -loss
 
-        loss.backward()
-        if ord == np.inf:
-            grad_sign = delta.grad.data.sign()
-            delta.data = delta.data + batch_multiply(eps_iter, grad_sign)
+            loss.backward()
+            
+            # Grad
+            if ord == np.inf:
+                grad = delta.grad.data.sign()
+
+            elif ord == 2:
+                grad = delta.grad.data
+                grad = normalize_by_pnorm(grad)
+
+
+            elif ord == 1:
+                grad = delta.grad.data
+                abs_grad = torch.abs(grad)
+
+                batch_size = grad.size(0)
+                view = abs_grad.view(batch_size, -1)
+                view_size = view.size(1)
+                if l1_sparsity is None:
+                    vals, idx = view.topk(1)
+                else:
+                    vals, idx = view.topk(
+                        int(np.round((1 - l1_sparsity) * view_size)))
+
+                out = torch.zeros_like(view).scatter_(1, idx, vals)
+                out = out.view_as(grad)
+                grad = grad.sign() * (out > 0).float()
+                grad = normalize_by_pnorm(grad, p=1)
+
+            else:
+                error = "Only ord = inf, ord = 1 and ord = 2 have been implemented"
+                raise NotImplementedError(error)
+                
+            if grad_total is None:
+                grad_total = grad
+            else:
+                grad_total += grad
+        
+        grad = grad_total / float(eot_iter)
+        delta.grad.data.zero_()
+        
+        # Delta    
+        if ord == np.inf:        
+            delta.data = delta.data + batch_multiply(eps_iter, grad)
             delta.data = batch_clamp(eps, delta.data)
             delta.data = clamp(xvar.data + delta.data, clip_min, clip_max
                                ) - xvar.data
-
         elif ord == 2:
-            grad = delta.grad.data
-            grad = normalize_by_pnorm(grad)
             delta.data = delta.data + batch_multiply(eps_iter, grad)
             delta.data = clamp(xvar.data + delta.data, clip_min, clip_max
                                ) - xvar.data
             if eps is not None:
                 delta.data = clamp_by_pnorm(delta.data, ord, eps)
-
         elif ord == 1:
-            grad = delta.grad.data
             abs_grad = torch.abs(grad)
 
             batch_size = grad.size(0)
@@ -125,7 +153,7 @@ def perturb_iterative(xvar, yvar, predict, nb_iter, eps, eps_iter, loss_fn,
         else:
             error = "Only ord = inf, ord = 1 and ord = 2 have been implemented"
             raise NotImplementedError(error)
-        delta.grad.data.zero_()
+        
 
     x_adv = clamp(xvar + delta, clip_min, clip_max)
     return x_adv
@@ -154,7 +182,7 @@ class PGDAttack(Attack, LabelMixin):
             self, predict, loss_fn=None, eps=0.3, nb_iter=40,
             eps_iter=0.01, rand_init=True, clip_min=0., clip_max=1.,
             ord=np.inf, l1_sparsity=None, targeted=False,
-            stop_when_done = False):
+            eot_iter=1):
         """
         Create an instance of the PGDAttack.
 
@@ -203,7 +231,7 @@ class PGDAttack(Attack, LabelMixin):
             ord=self.ord, clip_min=self.clip_min,
             clip_max=self.clip_max, delta_init=delta,
             l1_sparsity=self.l1_sparsity,
-            stop_when_done = self.stop_when_done
+            eot_iter=self.eot_iter
         )
 
         return rval.data
@@ -227,13 +255,13 @@ class LinfPGDAttack(PGDAttack):
     def __init__(
             self, predict, loss_fn=None, eps=0.3, nb_iter=40,
             eps_iter=0.01, rand_init=True, clip_min=0., clip_max=1.,
-            targeted=False):
+            targeted=False, eot_iter=1):
         ord = np.inf
         super(LinfPGDAttack, self).__init__(
             predict=predict, loss_fn=loss_fn, eps=eps, nb_iter=nb_iter,
             eps_iter=eps_iter, rand_init=rand_init, clip_min=clip_min,
             clip_max=clip_max, targeted=targeted,
-            ord=ord)
+            ord=ord, eot_iter=1)
 
 
 class L2PGDAttack(PGDAttack):
@@ -255,13 +283,13 @@ class L2PGDAttack(PGDAttack):
             self, predict, loss_fn=None, eps=0.3, nb_iter=40,
             eps_iter=0.01, rand_init=True, clip_min=0., clip_max=1.,
             targeted=False,
-            stop_when_done=False):
+            eot_iter=1):
         ord = 2
         super(L2PGDAttack, self).__init__(
             predict=predict, loss_fn=loss_fn, eps=eps, nb_iter=nb_iter,
             eps_iter=eps_iter, rand_init=rand_init, clip_min=clip_min,
             clip_max=clip_max, targeted=targeted,
-            ord=ord, stop_when_done=stop_when_done)
+            ord=ord, eot_iter=1)
 
 
 class L1PGDAttack(PGDAttack):
@@ -282,13 +310,13 @@ class L1PGDAttack(PGDAttack):
     def __init__(
             self, predict, loss_fn=None, eps=10., nb_iter=40,
             eps_iter=0.01, rand_init=True, clip_min=0., clip_max=1.,
-            targeted=False):
+            targeted=False, eot_iter=1):
         ord = 1
         super(L1PGDAttack, self).__init__(
             predict=predict, loss_fn=loss_fn, eps=eps, nb_iter=nb_iter,
             eps_iter=eps_iter, rand_init=rand_init, clip_min=clip_min,
             clip_max=clip_max, targeted=targeted,
-            ord=ord, l1_sparsity=None)
+            ord=ord, l1_sparsity=None, eot_iter=1)
 
 
 class SparseL1DescentAttack(PGDAttack):
